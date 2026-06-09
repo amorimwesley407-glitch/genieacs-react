@@ -7,6 +7,7 @@ const axios = require("axios");
 const cors = require("cors");
 const authRoutes  = require("./cadastrousers");
 const adminRoutes = require("./admin-users");
+const { searchPppoeUsers, searchPppoeByDevice } = require("./ixcClient");
 
 const app = express();
 app.use(cors());
@@ -192,6 +193,22 @@ function extractWanMac(d) {
  */
 function buildSearchQuery(search) {
   const regex = { $regex: search.trim(), $options: "i" };
+  const wanPppUsernameQueries = [];
+  const wanConnectionIndices = [1, 2, 3, 4, 5, 11, 13, 24, 45];
+
+  for (const wanConnection of wanConnectionIndices) {
+    for (const pppConnection of [1, 2, 3]) {
+      wanPppUsernameQueries.push({
+        [`InternetGatewayDevice.WANDevice.1.WANConnectionDevice.${wanConnection}.WANPPPConnection.${pppConnection}.Username`]:
+          regex,
+      });
+    }
+  }
+  wanPppUsernameQueries.push({
+    "InternetGatewayDevice.WANDevice.2.WANConnectionDevice.1.WANPPPConnection.1.Username":
+      regex,
+  });
+
   return {
     $or: [
       { _id: regex },
@@ -200,10 +217,7 @@ function buildSearchQuery(search) {
       { "_deviceId._OUI": regex },
       { "_deviceId._ProductClass": regex },
       { "InternetGatewayDevice.DeviceInfo.HardwareVersion": regex },
-      ...[1, 2, 3, 4, 5, 11, 13, 45].map((i) => ({
-        [`InternetGatewayDevice.WANDevice.1.WANConnectionDevice.${i}.WANPPPConnection.1.Username`]:
-          regex,
-      })),
+      ...wanPppUsernameQueries,
       {
         "InternetGatewayDevice.LANDevice.1.WLANConfiguration.1.SSID": regex,
       },
@@ -460,6 +474,32 @@ function extractWanStat(d, field) {
 
 app.get("/", requireAuth, (_req, res) => {
   res.send("API GenieACS rodando corretamente!");
+});
+
+/* ================= IXC ================= */
+
+app.get("/api/ixc/pppoe", requireAuth, async (req, res) => {
+  try {
+    const search = String(req.query.search || "").trim();
+    const mac = String(req.query.mac || "").trim();
+    const ip = String(req.query.ip || "").trim();
+    const limit = Number(req.query.limit || 10);
+    const type = String(req.query.type || "auto");
+    const users = search
+      ? await searchPppoeUsers(search, limit, type)
+      : await searchPppoeByDevice({ mac, ip, limit });
+
+    res.json({
+      total: users.length,
+      users,
+    });
+  } catch (err) {
+    const status = err.status || err.response?.status || 500;
+    res.status(status).json({
+      error: err.message || "Erro ao consultar PPPoE no IXC",
+      details: err.response?.data || undefined,
+    });
+  }
 });
 
 /* ================= SUMMARY PARA GRÁFICOS (todos os devices, sem paginação) ================= */

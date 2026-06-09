@@ -11,11 +11,32 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Device } from "@/types/device";
-import { Network, Wifi, Eye, EyeOff } from "lucide-react";
+import { Network, Wifi, Eye, EyeOff, Search, Loader2, Check } from "lucide-react";
 
 // BUG CORRIGIDO: API_BASE estava declarada dentro do handler (escopo errado);
 // movida para o topo do módulo.
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000";
+
+function isValidLookupMac(value?: string) {
+  const clean = String(value || "").replace(/[^a-fA-F0-9]/g, "");
+  return clean.length === 12 || clean.length === 16;
+}
+
+function isValidLookupIp(value?: string) {
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(String(value || "").trim());
+}
+
+interface IxcPppoeUser {
+  id?: string;
+  customerId?: string;
+  username: string;
+  password?: string;
+  planId?: string;
+  vlan?: string;
+  mac?: string;
+  onuMac?: string;
+  status?: string;
+}
 
 interface EditDeviceModalProps {
   device: Device | null;
@@ -40,6 +61,9 @@ export function EditDeviceModal({
   const [showPassword, setShowPassword] = useState(false);
   const [showPasswordwifi5g, setShowPasswordwifi5g] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [ixcLoading, setIxcLoading] = useState(false);
+  const [ixcUsers, setIxcUsers] = useState<IxcPppoeUser[]>([]);
+  const [ixcMessage, setIxcMessage] = useState<string | null>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [showSuccessDialog, setShowSuccessDialog] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -69,6 +93,8 @@ export function EditDeviceModal({
 
       setUsername(userValue);
       setPassword(passValue);
+      setIxcUsers([]);
+      setIxcMessage(null);
     } else {
       setSsid2(device.wifi?.ssid2 || "");
       setSsid5(device.wifi?.ssid5 || "");
@@ -80,6 +106,60 @@ export function EditDeviceModal({
   const handleAttemptSave = () => {
     setErrorMessage(null);
     setShowConfirmDialog(true);
+  };
+
+  const handleSearchIxc = async () => {
+    const mac = device?.macAddress || "";
+    const ip = device?.ipv4 || device?.ip || "";
+
+    if (!isValidLookupMac(mac) && !isValidLookupIp(ip)) {
+      setIxcMessage("Este dispositivo nao tem MAC ou IP valido para consultar no IXC.");
+      return;
+    }
+
+    setIxcLoading(true);
+    setIxcMessage(null);
+    setIxcUsers([]);
+
+    try {
+      const params = new URLSearchParams({
+        limit: "5",
+      });
+      if (isValidLookupMac(mac)) params.set("mac", mac);
+      if (isValidLookupIp(ip)) params.set("ip", ip);
+
+      const res = await fetch(
+        `${API_BASE}/api/ixc/pppoe?${params.toString()}`,
+        {
+          headers: {
+            Authorization: `Bearer ${sessionStorage.getItem("token")}`,
+          },
+        }
+      );
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data.error || "Falha ao consultar PPPoE no IXC");
+      }
+
+      const users = Array.isArray(data.users) ? data.users : [];
+      setIxcUsers(users);
+      if (users.length === 0) {
+        setIxcMessage("Nenhum PPPoE encontrado para o MAC/IP deste dispositivo no IXC.");
+      }
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : "Nao foi possivel consultar o IXC.";
+      setIxcMessage(message);
+    } finally {
+      setIxcLoading(false);
+    }
+  };
+
+  const handleUseIxcUser = (user: IxcPppoeUser) => {
+    setUsername(user.username || "");
+    setPassword(user.password || "");
+    setIxcMessage("Dados preenchidos a partir do IXC. Confirme antes de salvar.");
   };
 
   const handleConfirmedSave = async () => {
@@ -167,6 +247,9 @@ export function EditDeviceModal({
   const isPppoe = type === "pppoe";
   const Icon = isPppoe ? Network : Wifi;
   const title = isPppoe ? "Editar PPPoE" : "Editar WiFi";
+  const lookupMac = device?.macAddress || "";
+  const lookupIp = device?.ipv4 || device?.ip || "";
+  const canSearchIxc = isValidLookupMac(lookupMac) || isValidLookupIp(lookupIp);
 
   return (
     <>
@@ -192,6 +275,75 @@ export function EditDeviceModal({
                     className="font-mono"
                     disabled={loading}
                   />
+                </div>
+
+                <div className="space-y-2 rounded-md border border-border p-3">
+                  <Label>Consulta IXC</Label>
+                  <div className="flex flex-wrap gap-2 text-xs">
+                    {isValidLookupMac(lookupMac) && (
+                      <span className="rounded border border-border bg-muted px-2 py-1 font-mono">
+                        MAC {lookupMac}
+                      </span>
+                    )}
+                    {isValidLookupIp(lookupIp) && (
+                      <span className="rounded border border-border bg-muted px-2 py-1 font-mono">
+                        IP {lookupIp}
+                      </span>
+                    )}
+                    {!canSearchIxc && (
+                      <span className="text-muted-foreground">
+                        MAC/IP indisponivel para consulta.
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleSearchIxc}
+                      disabled={loading || ixcLoading || !canSearchIxc}
+                      className="w-full"
+                    >
+                      {ixcLoading ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Search className="h-4 w-4" />
+                      )}
+                      <span className="ml-2">Buscar IXC</span>
+                    </Button>
+                  </div>
+
+                  {ixcUsers.length > 0 && (
+                    <div className="space-y-2">
+                      {ixcUsers.map((user) => (
+                        <button
+                          key={`${user.id || user.username}-${user.customerId || ""}`}
+                          type="button"
+                          onClick={() => handleUseIxcUser(user)}
+                          className="flex w-full items-center justify-between gap-3 rounded-md border border-border bg-background px-3 py-2 text-left text-sm hover:bg-muted"
+                          disabled={loading}
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate font-mono">
+                              {user.username || "-"}
+                            </span>
+                            <span className="block truncate text-xs text-muted-foreground">
+                              Cliente {user.customerId || "-"}
+                              {user.planId ? ` | Plano ${user.planId}` : ""}
+                              {user.vlan && user.vlan !== "0" ? ` | VLAN ${user.vlan}` : ""}
+                              {user.mac ? ` | MAC ${user.mac}` : ""}
+                              {user.onuMac ? ` | ONU ${user.onuMac}` : ""}
+                            </span>
+                          </span>
+                          <Check className="h-4 w-4 shrink-0 text-green-600" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {ixcMessage && (
+                    <p className="text-xs text-muted-foreground">{ixcMessage}</p>
+                  )}
                 </div>
 
                 <div className="space-y-2">
@@ -322,6 +474,11 @@ export function EditDeviceModal({
                 <p className="font-mono text-xs mt-1 break-all">
                   Serial: {device.serialNumber || device.serial || device.id}
                 </p>
+                {device.macAddress && device.macAddress !== "—" && device.macAddress !== "-" && (
+                  <p className="font-mono text-xs mt-1 break-all">
+                    MAC WAN: {device.macAddress}
+                  </p>
+                )}
               </div>
             )}
           </div>
